@@ -1,11 +1,12 @@
-String message =  "Message";
+char myChar =  'A';
 int cypher = 5;
 void setup() {
-  // put your setup code here, to run once:
+  Serial.begin(115200);
+  myChar = myChar + cypher;
+  Serial.print(myChar);
 
 }
 
 void loop() {
-  message = message + cypher;
-  Serial.print(message);
+ 
 }
