@@ -1,4 +1,4 @@
-char myChar =  'A';
+String message =  "Message";
 int cypher = 5;
 void setup() {
   // put your setup code here, to run once:
@@ -6,6 +6,6 @@ void setup() {
 }
 
 void loop() {
-  myChar = myChar + cypher;
-  Serial.print(myChar);
+  message = message + cypher;
+  Serial.print(message);
 }
