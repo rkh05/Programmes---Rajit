@@ -1,0 +1,661 @@
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <WiFiClientSecure.h>
+#include "pitches.h"
+#include <WebSocketsServer.h>
+#include <WebServer.h>
+
+WiFiMulti WiFiMulti;
+WebSocketsServer webSocket = WebSocketsServer(81);
+WebServer server(80);
+
+
+#include <Wire.h>
+#include "SSD1306Ascii.h"
+#include "SSD1306AsciiWire.h"
+#include <Adafruit_NeoPixel.h>
+
+byte attinySlaveArray[3];
+
+#define PEXP_I2CADDR 0x23
+#define OLED_I2CAADR 0x3C
+#define SR04_I2CADDR 0x57
+#define LED_COUNT 3
+#define NEO_PIXEL 5
+Adafruit_NeoPixel strip(LED_COUNT, NEO_PIXEL, NEO_GRB + NEO_KHZ800);
+
+
+SSD1306AsciiWire oled;
+
+// i2c PCF8574(A) Port expander
+// PCF8574  -> 0 0 1 0  0 A2 A1 A0    0 0 1 1
+// PCF8574A -> 0 0 1 1  1 A2 A1 A0    1 0 1 1
+
+#define PEXP_I2CADDR 0x23
+//#define PEXP_A_I2CADDR 0x3B
+
+// i2c Slave Co-processor
+#define I2CADDR 0x13
+// I2C address  - MainBoard
+#define I2CADDR_B 0x12
+
+#define I2C_SDA 19
+#define I2C_SCL 18
+#define LED 2
+#define IR_RECV 4
+
+
+#define STOP 0
+#define CW 1
+#define CCW 2
+#define LED_COUNT 3
+
+byte attinySlaveRcvArray[3];
+byte attinySlaveArrayBoard[3];
+
+// Replace with your network credentials
+const char* ssid = "xxxx";
+const char* password = "xxxx";
+
+bool ledState = 0;
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <title>ESP Web Server</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <style>
+  html {
+    font-family: Arial, Helvetica, sans-serif;
+    text-align: center;
+  }
+  </style>
+<title>ESP Web Server</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="topnav">
+    <h1>C3 CoreModule - CockroachBot WebSocket Server</h1>
+  </div>
+  <div class="content">
+    <div class="card">
+      <h2>LED - GPIO 2</h2>
+      <p class="state">state: <span id="state">-</span></p>
+      <p><button id="button" class="button">Toggle</button></p>
+    </div>
+  </div>
+<script>
+  var gateway = `ws://${window.location.hostname}:81`;
+  var websocket;
+  window.addEventListener('load', onLoad);
+  function initWebSocket() {
+    console.log('Trying to open a WebSocket connection...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen    = onOpen;
+    websocket.onclose   = onClose;
+    websocket.onmessage = onMessage; // <-- add this line
+  }
+  function onOpen(event) {
+    console.log('Connection opened');
+  }
+  function onClose(event) {
+    console.log('Connection closed');
+    setTimeout(initWebSocket, 2000);
+  }
+  function onMessage(event) {
+    var state;
+    if (event.data == "LED=1"){
+      state = "ON";
+    }
+    else if (event.data == "LED=0"){
+      state = "OFF";
+    }
+    document.getElementById('state').innerHTML = state;
+  }
+  function onLoad(event) {
+    initWebSocket();
+    initButton();
+  }
+  function initButton() {
+    document.getElementById('button').addEventListener('click', toggle);
+  }
+  function toggle(){
+    websocket.send('toggle');
+  }
+</script>
+</body>
+</html>
+)rawliteral";
+
+
+void handleNotFound() {
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += (server.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+  for (uint8_t i = 0; i < server.args(); i++) {
+    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+  }
+  server.send(404, "text/plain", message);
+}
+int setMotorRunning(uint8_t motorState) {
+    attinySlaveArrayBoard[0] = 0x01;  // Command 0x01
+    attinySlaveArrayBoard[1] = motorState? 0x01:0x00;  // Param1 - Stop/Run
+    attinySlaveArrayBoard[2] = 0x00;  // Param2 - Dummy in this case
+    delay(10);
+    Wire.beginTransmission(I2CADDR_B);
+    Wire.write(attinySlaveArrayBoard, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+
+int setDirection(int motor, byte direction) {
+    attinySlaveArrayBoard[0] = motor == 0 ? 0x13 : 0x23;  // Command 0x13 or 0x23
+    attinySlaveArrayBoard[1] = (direction >= 0) && (direction <= 2) ? direction: 0;  
+                                                          // Param1 - Stop/CW/CCW
+    attinySlaveArrayBoard[2] = 0x00;  // Param2 - Dummy in this case
+    delay(10);
+    Wire.beginTransmission(I2CADDR_B);
+    Wire.write(attinySlaveArrayBoard, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+int setRPM(int motor, float rpm) {
+
+    unsigned int rpm_x_100 = (int) (rpm * 100);
+  
+    attinySlaveArrayBoard[0] = motor == 0 ? 0x14 : 0x24;  // Command 0x14 or 0x24
+    attinySlaveArrayBoard[1] = (rpm_x_100 & 0xff);        // Param1 - rpm*100 (L)
+    attinySlaveArrayBoard[2] = (rpm_x_100 >> 8) & 0xff;   // Param2 - rpm*100 (H)
+    delay(10);
+    Wire.beginTransmission(I2CADDR_B);
+    Wire.write(attinySlaveArrayBoard, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+
+int setDeg(int motor, float deg) {
+
+    unsigned int deg_x_10 = (int) (deg * 10);
+  
+    attinySlaveArrayBoard[0] = motor == 0 ? 0x16 : 0x26;  // Command 0x14 or 0x24
+    attinySlaveArrayBoard[1] = (deg_x_10 & 0xff);        // Param1 - rpm*10 (L)
+    attinySlaveArrayBoard[2] = (deg_x_10 >> 8) & 0xff;   // Param2 - deg*10(H)
+    delay(10);
+    Wire.beginTransmission(I2CADDR_B);
+    Wire.write(attinySlaveArrayBoard, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+unsigned int ping_cm()
+{
+    unsigned long distance = 0;
+    byte i;   
+    byte ds[3];
+
+    Wire.beginTransmission(SR04_I2CADDR);
+    Wire.write(1);          //1 = cmd to start meansurement
+    Wire.endTransmission();
+    delay(120);             //1 cycle approx. 100mS. 
+    i = 0;
+    Wire.requestFrom(0x57,3);  //read distance       
+    while (Wire.available())
+    {
+     ds[i++] = Wire.read();
+    }        
+    
+    distance = (unsigned long)(ds[0]) * 65536;
+    distance = distance + (unsigned long)(ds[1]) * 256;
+    distance = (distance + (unsigned long)(ds[2])) / 10000;
+    
+    //measured value between 1cm to 6meters
+    if ((1<=distance)&&(600>=distance)) {
+        return (int)distance;
+    }
+    else {
+        return 0;
+    }
+}
+int setFreq(unsigned int frequency) {
+    attinySlaveArray[0] = 0x10;  // Command 0x10
+    attinySlaveArray[1] = (frequency & 0xff);        // Param1 - freq (L)
+    attinySlaveArray[2] = (frequency >> 8) & 0xff;   // Param2 - freq (H)
+    delay(10);
+    Wire.beginTransmission(I2CADDR);
+    Wire.write(attinySlaveArray, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+
+
+int setToneDuration(unsigned int duration) {
+    attinySlaveArray[0] = 0x11;  // Command 0x11
+    attinySlaveArray[1] = (duration & 0xff);        // Param1 - duration (L)
+    attinySlaveArray[2] = (duration >> 8) & 0xff;   // Param2 - duration (H)
+    delay(10);
+    Wire.beginTransmission(I2CADDR);
+    Wire.write(attinySlaveArray, 3); // Sends 3 bytes i2c to Co-processor.
+    if (Wire.endTransmission () == 0) { // Receive 0 = success (ACK response) 
+        Serial.println("i2c Write to 0x12 Sucessfull");
+        return 0;
+    }
+    else {
+        Serial.println("i2c Write Failed");
+        return 1;
+    }
+}
+
+
+void playNote(unsigned int frequency, unsigned int duration) {
+  setFreq(frequency);
+  setToneDuration(duration * 0.9);
+  delay(duration); 
+}
+
+
+
+void changeMode(){
+  setMotorRunning(LOW);
+  playNote(950, 800);
+    playNote(700, 500);
+    playNote(950, 800);
+    playNote(700, 500);
+    playNote(950, 800);
+    playNote(700, 500);
+    delay(2000);
+    oled.clear();
+    oled.println("Creepy theme");
+
+    playNote(NOTE_D6,1111);
+    playNote(NOTE_A6,1111);
+    playNote(NOTE_AS6,1111);
+    playNote(NOTE_E7,1111);
+     playNote(NOTE_D6,1111);
+    playNote(NOTE_A6,1111);
+    playNote(NOTE_AS6,1111);
+    playNote(NOTE_G7,1111);
+    delay(2000);
+    oled.clear();
+    oled.println("Road Rage mode engaged");
+}
+
+void playRandomNote() {
+  setFreq(random(31,4978));
+  unsigned int x= (0.9 * random(500,1000));
+  setToneDuration (x);
+  delay(x);
+}
+
+void goCRAZY() {
+  int x= random(0,3);
+  int y=random(0,1800);
+  setDirection(0, x);
+  setDirection(1, x);
+  setDeg(0, y);
+  setDeg(1,y);
+  setRPM(0,15);
+  setRPM(1,15);
+  setMotorRunning(HIGH);
+  delay(random(1000,3500));
+  setDirection(0, CCW);
+  setDirection(1, CW);
+  setMotorRunning(HIGH);
+  delay(random(1000,5000));
+  strip.setPixelColor(0, strip.Color(random(255),random(255),random(255)));
+    strip.setPixelColor(1, strip.Color(random(255),random(255),random(255)));
+    strip.setPixelColor(2, strip.Color(random(255),random(255),random(255)));
+    strip.show(); // This sends the updated pixel color to the hardware.
+    
+    
+  unsigned int a = 10;
+      if (ping_cm() < a) {
+      oled.clear();
+      oled.println("-Motor Stop (1s)-");
+      setMotorRunning(LOW);
+      delay(1000);
+      oled.println("-Motor Start CW- (5s)");
+      setDirection(0, CW);
+      setDirection(1, CW);
+      setMotorRunning(HIGH);
+      delay(5000);
+  
+}
+}
+
+
+void calmBus(){
+
+    oled.clear();
+    oled.println("Bus Stop #1");
+    setMotorRunning(LOW);
+    delay(10000);
+
+    oled.clear();
+    oled.println("Bus leaving");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(10000);
+
+    
+    delay(250);                       
+    
+    delay(500);  
+
+    oled.clear();
+    oled.println("Bus Stop #2");
+    setMotorRunning(LOW);
+    delay(10000);
+
+    oled.clear();
+    oled.println("Bus leaving");
+    oled.println("-Motor Turn right 30 deg-");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,7);
+    setRPM(1,15);
+    setDeg(0, 300);
+    setDeg(1,300);
+    setMotorRunning(HIGH);
+    delay(1000);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(4000);
+
+    oled.clear();
+    oled.println("-Motor Turn right 60 deg-");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,7);
+    setRPM(1,15);
+    setDeg(0, 600);
+    setDeg(1,600);
+    setMotorRunning(HIGH);
+    delay(2000);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(7000);
+
+    oled.clear();
+    oled.println("Bus Stop #3");
+    setMotorRunning(LOW);
+    delay(10000);
+
+ 
+   
+    oled.clear();
+    oled.println("Bus leaving");
+    oled.println("-Motor Turn right 90 deg-");
+    setDirection(0, CW);
+    setDirection(1, CW);
+    setMotorRunning(HIGH);
+    delay(2500);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(2000);
+    
+    oled.clear();
+    oled.println("-Motor Turn right 90 deg-");
+    setDirection(0, CW);
+    setDirection(1, CW);
+    setMotorRunning(HIGH);
+    delay(2500);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(2500);
+
+    oled.clear();
+    oled.println("-Motor Turn left 90 deg-");
+    setDirection(0, CCW);
+    setDirection(1, CCW);
+    setMotorRunning(HIGH);
+    delay(2500);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(3000);
+
+
+    oled.clear();
+    oled.println("Bus Stop #4");
+    setMotorRunning(LOW);
+    delay(10000);
+
+    oled.clear();
+    oled.println("Bus leaving");
+    oled.println("-Motor Turn left 70 deg-");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,15);
+    setRPM(1,7);
+    setDeg(0, 700);
+    setDeg(1,700);
+    setMotorRunning(HIGH);
+    delay(2500);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(8000);
+
+    oled.clear();
+    oled.println("-Motor Turn right 73 deg-");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,7);
+    setRPM(1,15);
+    setDeg(0, 730);
+    setDeg(1,730);
+    setMotorRunning(HIGH);
+    delay(2430);
+
+    oled.clear();
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setRPM(0,10);
+    setRPM(1,10);
+    setMotorRunning(HIGH);
+    delay(8000);
+
+    oled.clear();
+    oled.println("Bus Stop #5");
+    setMotorRunning(LOW);
+    delay(1000);
+
+    oled.println("-Motor Start CW- (3.5s)");
+    setDirection(0, CW);
+    setDirection(1, CW);
+    setMotorRunning(HIGH);
+    delay(4000);
+
+    oled.clear();
+    oled.println("-Motor Start FW (15s)-");
+    setDirection(0, CCW);
+    setDirection(1, CW);
+    setMotorRunning(HIGH);
+    delay(31000);
+    
+    oled.println("-Motor Start CW- (3.5s)");
+    setDirection(0, CW);
+    setDirection(1, CW);
+    setMotorRunning(HIGH);
+    delay(2000); 
+
+  
+}
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+
+    switch(type) {
+        case WStype_DISCONNECTED:
+            Serial.printf("[%u] Disconnected!\n", num);
+            break;
+        case WStype_CONNECTED:
+            {
+                IPAddress ip = webSocket.remoteIP(num);
+                Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+
+                // send message to client
+                webSocket.sendTXT(num, "Connected");
+                webSocket.sendTXT(num, ledState? "LED=1": "LED=0");
+            }
+            break;
+        case WStype_TEXT:
+            Serial.printf("[%u] get Text: %s\n", num, payload);
+            if (strcmp((char*)payload, "ROADRAGE") == 0) {
+              oled.clear();
+              changeMode();
+              int z=1;
+              while (z<10000){
+              goCRAZY();
+              playRandomNote();
+              z++;
+              if (strcmp((char*)payload, "CALM") == 0);
+                break;
+              if (strcmp((char*)payload, "STOP") == 0);
+                break;
+              }
+              webSocket.broadcastTXT(ledState? "LED=1": "LED=0");
+            }
+            else if (strcmp((char*)payload, "CALM") == 0) {
+              int g=1;
+              while (g<10000){
+              calmBus();
+              g++;
+              if (strcmp((char*)payload, "STOP") == 0);
+                break;
+              if (strcmp((char*)payload, "ROADRAGE")==0);
+                break;
+              }
+              webSocket.broadcastTXT(ledState? "LED=1": "LED=0");
+            }
+
+           
+
+            break;
+        case WStype_BIN:
+        case WStype_ERROR:      
+        case WStype_FRAGMENT_TEXT_START:
+        case WStype_FRAGMENT_BIN_START:
+        case WStype_FRAGMENT:
+        case WStype_FRAGMENT_FIN:
+          break;
+    }
+
+}
+
+
+void setup(){
+  Wire.begin(I2C_SDA, I2C_SCL);    
+  oled.begin(&Adafruit128x64, OLED_I2CAADR); 
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+  delay(2000);
+
+  Serial.begin(115200);
+
+  oled.setFont(Adafruit5x7);
+  oled.clear();
+  oled.println("WebSocket Server");
+  
+  WiFiMulti.addAP(ssid, password);
+  
+  while(WiFiMulti.run() != WL_CONNECTED) {
+      delay(100);
+      
+  }
+  // Print ESP Local IP Address
+  Serial.println(WiFi.localIP());
+  oled.println(WiFi.localIP());
+  
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+
+  // handle index
+  server.on("/", []() {
+      // send index.html
+      server.send(200, "text/html", index_html);
+  }
+  );
+
+  
+  server.onNotFound(handleNotFound);
+
+  server.begin();     
+   strip.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+    strip.show();            // Turn OFF all pixels ASAP
+    strip.setBrightness(100); // Set BRIGHTNESS max 255
+    randomSeed(analogRead(0));
+                                 
+
+}
+void loop() {
+  webSocket.loop();
+  server.handleClient();
+  digitalWrite(LED, ledState);
+  delay(2);//allow the cpu to switch to other tasks
+}
